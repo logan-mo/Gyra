@@ -3,11 +3,45 @@ import time
 
 import cv2
 import numpy as np
+import torch
 from ultralytics import YOLO
 
 
 def expected_angle_step(rpm, fps):
     return (360.0 * rpm) / (60.0 * fps)
+
+
+def is_cuda_available():
+    try:
+        return cv2.cuda.getCudaEnabledDeviceCount() > 0
+    except Exception:
+        return False
+
+
+def warp_affine(frame, M, size, use_cuda):
+    if use_cuda:
+        try:
+            gpu_frame = cv2.cuda_GpuMat()
+            gpu_frame.upload(frame)
+            warped = cv2.cuda.warpAffine(
+                gpu_frame,
+                M,
+                size,
+                flags=cv2.INTER_LINEAR,
+                borderMode=cv2.BORDER_CONSTANT,
+                borderValue=(0, 0, 0),
+            )
+            return warped.download()
+        except Exception:
+            pass
+    return cv2.warpAffine(
+        frame,
+        M,
+        size,
+        flags=cv2.INTER_LINEAR,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=(0, 0, 0),
+    )
 
 
 def estimate_rotation(prev_gray, curr_gray):
@@ -56,11 +90,29 @@ def estimate_rotation_ecc(prev_gray, curr_gray):
     return angle
 
 
+def estimate_rotation_ecc_fast(prev_gray, curr_gray, max_dim=480):
+    if max(prev_gray.shape) > max_dim:
+        small_prev = cv2.resize(prev_gray, (max_dim, int(prev_gray.shape[0] * max_dim / prev_gray.shape[1])))
+        small_curr = cv2.resize(curr_gray, (max_dim, int(curr_gray.shape[0] * max_dim / curr_gray.shape[1])))
+    else:
+        small_prev = prev_gray
+        small_curr = curr_gray
+
+    return estimate_rotation_ecc(small_prev, small_curr)
+
+
 def run_viewer(video_path: str, rpm: int):
     cap = cv2.VideoCapture(video_path)
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cudnn.enabled = True
 
     model = YOLO("yolo26n.pt")
     draw_detections = True
+
+    use_cuda = is_cuda_available()
+    print(f"OpenCV CUDA enabled: {use_cuda}")
 
     if not cap.isOpened():
         raise ValueError("Could not open video")
@@ -102,7 +154,7 @@ def run_viewer(video_path: str, rpm: int):
 
         # --- estimate ---
         stabilize_start = time.time()
-        delta_est = estimate_rotation_ecc(prev_gray, gray)
+        delta_est = estimate_rotation_ecc_fast(prev_gray, gray, max_dim=320)
 
         # --- reject garbage (ECC can spike under blur) ---
         if abs(delta_est) > 30:  # unrealistic jump → ignore
@@ -132,14 +184,7 @@ def run_viewer(video_path: str, rpm: int):
 
         # --- stabilize ---
         M = cv2.getRotationMatrix2D(center, -cumulative_angle, 1.0)
-        stabilized = cv2.warpAffine(
-            frame,
-            M,
-            (w, h),
-            flags=cv2.INTER_LINEAR,
-            borderMode=cv2.BORDER_CONSTANT,
-            borderValue=(0, 0, 0),
-        )
+        stabilized = warp_affine(frame, M, (w, h), use_cuda)
         stabilize_end = time.time()
         total_stabilize_time += (stabilize_end - stabilize_start)
 

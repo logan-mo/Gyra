@@ -54,7 +54,7 @@ def warp_affine(frame, M, dsize):
     return warp_affine_opencv_cuda(frame, M, dsize)
 
 
-def run_viewer(video_path: str, rpm: int):
+def run_viewer(video_path: str, rpm: int, output_path: str = None):
     cap = cv2.VideoCapture(video_path)
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
@@ -96,6 +96,17 @@ def run_viewer(video_path: str, rpm: int):
     total_inference_time = 0.0
     start_time = time.time()
 
+    # Initialize video writer if output_path is provided
+    video_writer = None
+    if output_path:
+        combined_w = 2 * w
+        combined_h = h
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        video_writer = cv2.VideoWriter(
+            output_path, fourcc, fps, (combined_w, combined_h)
+        )
+        print(f"Saving output video to: {output_path}")
+
     display_queue = queue.Queue(maxsize=10)
 
     def display_worker():
@@ -107,8 +118,9 @@ def run_viewer(video_path: str, rpm: int):
             cv2.imshow("Original (Left) | Stabilized + Vehicles (Right)", combined)
             cv2.waitKey(1)
 
-    display_thread = threading.Thread(target=display_worker, daemon=True)
-    display_thread.start()
+    if not output_path:
+        display_thread = threading.Thread(target=display_worker, daemon=True)
+        display_thread.start()
 
     while True:
         ret, frame = cap.read()
@@ -187,13 +199,19 @@ def run_viewer(video_path: str, rpm: int):
                     )
 
         combined = np.hstack((frame, stabilized))
-        if frame_count % display_interval == 0:
-            display_queue.put(combined)
+        if output_path:
+            video_writer.write(combined)
+        else:
+            if frame_count % display_interval == 0:
+                display_queue.put(combined)
 
         prev_gray = gray
 
-    display_queue.put(None)
-    display_thread.join()
+    if output_path:
+        video_writer.release()
+    else:
+        display_queue.put(None)
+        display_thread.join()
 
     cap.release()
     cv2.destroyAllWindows()
@@ -217,7 +235,12 @@ if __name__ == "__main__":
 
     parser.add_argument("video_path", type=str)
     parser.add_argument("--rpm", required=True, type=int)
+    parser.add_argument(
+        "--output",
+        type=str,
+        help="Path to save the output video (e.g., output.mp4). If not provided, displays the video.",
+    )
 
     args = parser.parse_args()
 
-    run_viewer(args.video_path, args.rpm)
+    run_viewer(args.video_path, args.rpm, args.output)

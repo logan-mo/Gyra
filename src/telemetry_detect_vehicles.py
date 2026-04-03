@@ -2,6 +2,7 @@ import argparse
 import time
 
 import cv2
+import kornia.geometry as K
 import numpy as np
 import torch
 from ultralytics import YOLO
@@ -12,28 +13,22 @@ def expected_angle_step(rpm, fps):
 
 
 def is_cuda_available():
-    try:
-        return cv2.cuda.getCudaEnabledDeviceCount() > 0
-    except Exception:
-        return False
+    return torch.cuda.is_available()
 
 
 def warp_affine(frame, M, size, use_cuda):
     if use_cuda:
         try:
-            gpu_frame = cv2.cuda_GpuMat()
-            gpu_frame.upload(frame)
-            warped = cv2.cuda.warpAffine(
-                gpu_frame,
-                M,
-                size,
-                flags=cv2.INTER_LINEAR,
-                borderMode=cv2.BORDER_CONSTANT,
-                borderValue=(0, 0, 0),
-            )
-            return warped.download()
-        except Exception:
-            pass
+            # Convert to tensor: HWC -> CHW -> NCHW, normalize to [0,1], to GPU
+            img_tensor = torch.from_numpy(frame).permute(2, 0, 1).unsqueeze(0).float().cuda() / 255.0
+            M_tensor = torch.from_numpy(M).float().cuda().unsqueeze(0)  # [2,3] -> [1,2,3]
+            warped_tensor = K.warp_affine(img_tensor, M_tensor, (size[1], size[0]), mode='bilinear', padding_mode='zeros')
+            # Convert back: NCHW -> CHW -> HWC, denormalize, to CPU numpy
+            warped = (warped_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+            warped = np.ascontiguousarray(warped)
+            return warped
+        except Exception as e:
+            print(f"GPU warp failed: {e}")
     return cv2.warpAffine(
         frame,
         M,
@@ -138,6 +133,9 @@ def run_viewer(video_path: str, rpm: int):
     max_error = 3.0  # total accumulated correction cap
     center = (w // 2, h // 2)
 
+    ecc_interval = 3  # reduce ECC calls: once every N frames
+    display_interval = 2  # reduce GUI updates while keeping window alive
+
     # Telemetry variables
     frame_count = 0
     total_stabilize_time = 0.0
@@ -154,11 +152,18 @@ def run_viewer(video_path: str, rpm: int):
 
         # --- estimate ---
         stabilize_start = time.time()
-        delta_est = estimate_rotation_ecc_fast(prev_gray, gray, max_dim=320)
 
-        # --- reject garbage (ECC can spike under blur) ---
-        if abs(delta_est) > 30:  # unrealistic jump → ignore
-            delta_est = prev_delta_est
+        if frame_count % ecc_interval == 0:
+            delta_est = estimate_rotation_ecc_fast(prev_gray, gray, max_dim=320)
+            if abs(delta_est) > 30:  # unrealistic jump → ignore
+                delta_est = prev_delta_est
+
+            # Very occasional ORB fallback if ECC failed
+            if abs(delta_est) < 1e-6:
+                delta_est = estimate_rotation(prev_gray, gray)
+        else:
+            # use predicted rotation from last good telemetry to avoid extra compute
+            delta_est = expected_step
 
         # --- temporal smoothing (critical) ---
         delta_est = 0.85 * prev_delta_est + 0.15 * delta_est
@@ -229,9 +234,11 @@ def run_viewer(video_path: str, rpm: int):
                     )
 
         combined = np.hstack((frame, stabilized))
-        cv2.imshow("Original (Left) | Stabilized + Vehicles (Right)", combined)
+        if frame_count % display_interval == 0:
+            cv2.imshow("Original (Left) | Stabilized + Vehicles (Right)", combined)
 
-        if cv2.waitKey(1) & 0xFF == 27:
+        key = cv2.waitKey(1) & 0xFF
+        if key == 27:
             break
 
         prev_gray = gray

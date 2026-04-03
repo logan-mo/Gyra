@@ -9,6 +9,7 @@ dependencies = [
   "opencv-python>=4.13.0.92",
   "torch>=2.11.0",
   "torchvision>=0.26.0",
+  "kornia>=0.7.0",
 ]
 
 [tool.uv.sources]

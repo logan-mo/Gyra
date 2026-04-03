@@ -10,6 +10,10 @@ dependencies = [
   "torch>=2.11.0",
   "torchvision>=0.26.0",
   "kornia>=0.7.0",
+  "onnx>=1.15.0",
+  "onnxruntime-gpu>=1.15.0",
+  "tensorrt>=8.5.0",
+  "pycuda>=2024.1",
 ]
 
 [tool.uv.sources]

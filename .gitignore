@@ -211,3 +211,5 @@ __marimo__/
 *.mp4
 .vscode/
 opencv_build/
+*.engine
+*.onnx

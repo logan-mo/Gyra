@@ -1,8 +1,9 @@
 import argparse
+import queue
+import threading
 import time
 
 import cv2
-import kornia.geometry as K
 import numpy as np
 import torch
 from ultralytics import YOLO
@@ -17,18 +18,6 @@ def is_cuda_available():
 
 
 def warp_affine(frame, M, size, use_cuda):
-    if use_cuda:
-        try:
-            # Convert to tensor: HWC -> CHW -> NCHW, normalize to [0,1], to GPU
-            img_tensor = torch.from_numpy(frame).permute(2, 0, 1).unsqueeze(0).float().cuda() / 255.0
-            M_tensor = torch.from_numpy(M).float().cuda().unsqueeze(0)  # [2,3] -> [1,2,3]
-            warped_tensor = K.warp_affine(img_tensor, M_tensor, (size[1], size[0]), mode='bilinear', padding_mode='zeros')
-            # Convert back: NCHW -> CHW -> HWC, denormalize, to CPU numpy
-            warped = (warped_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
-            warped = np.ascontiguousarray(warped)
-            return warped
-        except Exception as e:
-            print(f"GPU warp failed: {e}")
     return cv2.warpAffine(
         frame,
         M,
@@ -142,6 +131,20 @@ def run_viewer(video_path: str, rpm: int):
     total_inference_time = 0.0
     start_time = time.time()
 
+    display_queue = queue.Queue(maxsize=10)
+
+    def display_worker():
+        while True:
+            item = display_queue.get()
+            if item is None:
+                break
+            combined = item
+            cv2.imshow("Original (Left) | Stabilized + Vehicles (Right)", combined)
+            cv2.waitKey(1)
+
+    display_thread = threading.Thread(target=display_worker, daemon=True)
+    display_thread.start()
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -235,13 +238,12 @@ def run_viewer(video_path: str, rpm: int):
 
         combined = np.hstack((frame, stabilized))
         if frame_count % display_interval == 0:
-            cv2.imshow("Original (Left) | Stabilized + Vehicles (Right)", combined)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == 27:
-            break
+            display_queue.put(combined)
 
         prev_gray = gray
+
+    display_queue.put(None)
+    display_thread.join()
 
     cap.release()
     cv2.destroyAllWindows()

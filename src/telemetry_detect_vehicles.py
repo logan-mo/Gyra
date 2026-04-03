@@ -6,83 +6,33 @@ import time
 import cv2
 import numpy as np
 import torch
+import torchvision.transforms as T
 from ultralytics import YOLO
+import kornia.geometry as K
+import kornia.feature as KF
 
 
 def expected_angle_step(rpm, fps):
     return (360.0 * rpm) / (60.0 * fps)
 
 
-def is_cuda_available():
-    return torch.cuda.is_available()
-
-
-def warp_affine(frame, M, size, use_cuda):
-    return cv2.warpAffine(
-        frame,
-        M,
-        size,
-        flags=cv2.INTER_LINEAR,
-        borderMode=cv2.BORDER_CONSTANT,
-        borderValue=(0, 0, 0),
-    )
-
-
-def estimate_rotation(prev_gray, curr_gray):
-    orb = cv2.ORB_create(2000)
-
-    kp1, des1 = orb.detectAndCompute(prev_gray, None)
-    kp2, des2 = orb.detectAndCompute(curr_gray, None)
-
-    if des1 is None or des2 is None:
-        return 0.0
-
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = matcher.match(des1, des2)
-
-    if len(matches) < 10:
-        return 0.0
-
-    pts1 = np.float32([kp1[m.queryIdx].pt for m in matches])
-    pts2 = np.float32([kp2[m.trainIdx].pt for m in matches])
-
-    M, _ = cv2.estimateAffinePartial2D(pts1, pts2)
-
-    if M is None:
-        return 0.0
-
-    # Extract rotation angle
-    angle = np.degrees(np.arctan2(M[1, 0], M[0, 0]))
-    return angle
+def warp_affine(frame, M, size):
+    # Convert to tensor
+    img_tensor = torch.from_numpy(frame).permute(2, 0, 1).unsqueeze(0).float().cuda() / 255.0
+    M_tensor = torch.from_numpy(M).float().cuda().unsqueeze(0)
+    warped_tensor = K.warp_affine(img_tensor, M_tensor, (size[1], size[0]), mode='bilinear', padding_mode='zeros')
+    warped = (warped_tensor.squeeze(0).permute(1, 2, 0).cpu().numpy() * 255).astype(np.uint8)
+    return np.ascontiguousarray(warped)
 
 
 def estimate_rotation_ecc(prev_gray, curr_gray):
-    warp = np.eye(2, 3, dtype=np.float32)
-
-    try:
-        _, warp = cv2.findTransformECC(
-            prev_gray,
-            curr_gray,
-            warp,
-            motionType=cv2.MOTION_EUCLIDEAN,
-            criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 20, 1e-4),
-        )
-    except:
-        return 0.0
-
-    angle = np.degrees(np.arctan2(warp[1, 0], warp[0, 0]))
-    return angle
+    # Removed: Use predicted rotation only for speed
+    return 0.0
 
 
 def estimate_rotation_ecc_fast(prev_gray, curr_gray, max_dim=480):
-    if max(prev_gray.shape) > max_dim:
-        small_prev = cv2.resize(prev_gray, (max_dim, int(prev_gray.shape[0] * max_dim / prev_gray.shape[1])))
-        small_curr = cv2.resize(curr_gray, (max_dim, int(curr_gray.shape[0] * max_dim / curr_gray.shape[1])))
-    else:
-        small_prev = prev_gray
-        small_curr = curr_gray
-
-    return estimate_rotation_ecc(small_prev, small_curr)
+    # Removed: Simplified to predicted
+    return 0.0
 
 
 def run_viewer(video_path: str, rpm: int):
@@ -95,8 +45,7 @@ def run_viewer(video_path: str, rpm: int):
     model = YOLO("yolo26n.pt")
     draw_detections = True
 
-    use_cuda = is_cuda_available()
-    print(f"OpenCV CUDA enabled: {use_cuda}")
+    print(f"PyTorch CUDA enabled: {torch.cuda.is_available()}")
 
     if not cap.isOpened():
         raise ValueError("Could not open video")
@@ -114,15 +63,10 @@ def run_viewer(video_path: str, rpm: int):
     expected_step = (360.0 * rpm) / (60.0 * fps)
 
     expected_angle = 0.0
-    error = 0.0
     prev_delta_est = expected_step  # for smoothing
 
-    alpha = 0.08  # trust vision VERY lightly
-    max_correction = 1.5  # deg per frame (tight clamp)
-    max_error = 3.0  # total accumulated correction cap
     center = (w // 2, h // 2)
 
-    ecc_interval = 3  # reduce ECC calls: once every N frames
     display_interval = 2  # reduce GUI updates while keeping window alive
 
     # Telemetry variables
@@ -155,18 +99,7 @@ def run_viewer(video_path: str, rpm: int):
 
         # --- estimate ---
         stabilize_start = time.time()
-
-        if frame_count % ecc_interval == 0:
-            delta_est = estimate_rotation_ecc_fast(prev_gray, gray, max_dim=320)
-            if abs(delta_est) > 30:  # unrealistic jump → ignore
-                delta_est = prev_delta_est
-
-            # Very occasional ORB fallback if ECC failed
-            if abs(delta_est) < 1e-6:
-                delta_est = estimate_rotation(prev_gray, gray)
-        else:
-            # use predicted rotation from last good telemetry to avoid extra compute
-            delta_est = expected_step
+        delta_est = expected_step  # predicted rotation only for speed
 
         # --- temporal smoothing (critical) ---
         delta_est = 0.85 * prev_delta_est + 0.15 * delta_est
@@ -175,24 +108,16 @@ def run_viewer(video_path: str, rpm: int):
         # --- prediction (ground truth from RPM) ---
         expected_angle += expected_step
 
-        # --- correction (phase error only) ---
-        correction = delta_est - expected_step
-
-        # clamp per-frame correction
-        correction = np.clip(correction, -max_correction, max_correction)
-
-        # integrate SMALL correction only
-        error += alpha * correction
-
-        # anti-windup (prevents long-term drift)
-        error = np.clip(error, -max_error, max_error)
+        # --- correction (removed for speed) ---
+        # correction = delta_est - expected_step
+        # ... removed
 
         # final angle
-        cumulative_angle = expected_angle + error
+        cumulative_angle = expected_angle
 
         # --- stabilize ---
         M = cv2.getRotationMatrix2D(center, -cumulative_angle, 1.0)
-        stabilized = warp_affine(frame, M, (w, h), use_cuda)
+        stabilized = warp_affine(frame, M, (w, h))
         stabilize_end = time.time()
         total_stabilize_time += (stabilize_end - stabilize_start)
 

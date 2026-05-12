@@ -14,6 +14,7 @@ dependencies = [
   "onnxruntime-gpu>=1.15.0",
   "tensorrt>=8.5.0",
   "pycuda>=2024.1",
+  "vidstab[cv2]>=1.7.4",
 ]
 
 [tool.uv.sources]
